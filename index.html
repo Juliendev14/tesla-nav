@@ -1,0 +1,74 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1">
+  <title>Nav 3D</title>
+  <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.css">
+  <link rel="stylesheet" href="style.css">
+</head>
+<body>
+  <div id="map"></div>
+
+  <div id="panel">
+    <form id="search" autocomplete="off">
+      <input id="q" type="search" placeholder="Où allez-vous ?" enterkeyhint="search">
+    </form>
+    <ul id="results"></ul>
+
+    <div id="guidance" hidden>
+      <div id="next">
+        <div id="next-icon">↑</div>
+        <div>
+          <div id="next-dist"></div>
+          <div id="next-text"></div>
+        </div>
+      </div>
+      <div id="then"></div>
+      <div id="trip">
+        <div><span class="label">Arrivée</span><span id="eta">--:--</span></div>
+        <div><span class="label">Reste</span><span id="remain">--</span></div>
+        <button id="stop" type="button">Arrêter</button>
+      </div>
+    </div>
+
+    <div id="alert" hidden></div>
+  </div>
+
+  <div id="speed" hidden><span id="speed-val">0</span><small>km/h</small></div>
+
+  <div id="controls">
+    <button id="recenter" type="button" title="Recentrer">◎</button>
+    <button id="toggle3d" type="button" title="Vue 2D / 3D">2D</button>
+    <button id="toggleFlow" type="button" title="Fluidité du trafic">Trafic</button>
+    <button id="settingsBtn" type="button" title="Réglages">⚙</button>
+  </div>
+
+  <div id="status"></div>
+
+  <div id="settings" hidden>
+    <div class="sheet">
+      <h2>Réglages</h2>
+      <label>Clé API TomTom (alertes trafic)
+        <input id="key" type="text" placeholder="Collez votre clé ici" spellcheck="false">
+      </label>
+      <p class="hint">Clé gratuite sur developer.tomtom.com (2 500 requêtes d'alertes par jour).</p>
+      <label>Recherche d'adresses
+        <select id="geocoder">
+          <option value="fr">France (Base Adresse Nationale)</option>
+          <option value="eu">Europe (Photon / OpenStreetMap)</option>
+        </select>
+      </label>
+      <label class="check"><input id="voice" type="checkbox"> Guidage vocal</label>
+      <label class="check"><input id="demo" type="checkbox"> Mode démo (simule le trajet)</label>
+      <div class="row">
+        <button id="saveSettings" type="button" class="primary">Enregistrer</button>
+        <button id="closeSettings" type="button">Fermer</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="app.js"></script>
+</body>
+</html>
