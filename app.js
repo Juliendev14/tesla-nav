@@ -32,15 +32,23 @@ const store = {
   set(k, v) { try { localStorage.setItem('nav.' + k, JSON.stringify(v)); } catch { /* stockage indisponible */ } },
 };
 const params = new URLSearchParams(location.search);
+// Clé TomTom : lien ?key=... > clé saisie dans ⚙ > fichier config.js
+const configKey = ((window.NAV_CONFIG && window.NAV_CONFIG.tomtomKey) || '').trim();
 const settings = {
-  key: params.get('key') || store.get('key', ''),
+  key: (params.get('key') || '').trim() || store.get('key', '') || configKey,
   geocoder: store.get('geocoder', 'fr'),
   voice: store.get('voice', true),
   demo: params.has('demo') || store.get('demo', false),
   flow: store.get('flow', false),
   is3d: store.get('is3d', true),
 };
-if (params.get('key')) store.set('key', settings.key);
+if (params.get('key')) {
+  store.set('key', settings.key);
+  // On retire la clé de l'adresse : le favori enregistré ensuite reste propre.
+  params.delete('key');
+  const qs = params.toString();
+  try { history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash); } catch { /* ignoré */ }
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -536,7 +544,8 @@ $('toggleFlow').addEventListener('click', () => {
   setFlow(!settings.flow);
 });
 function openSettings() {
-  $('key').value = settings.key;
+  $('key').value = settings.key === configKey ? '' : settings.key;
+  $('key').placeholder = configKey ? 'Clé du fichier config.js utilisée' : 'Collez votre clé ici';
   $('geocoder').value = settings.geocoder;
   $('voice').checked = settings.voice;
   $('demo').checked = settings.demo;
@@ -545,12 +554,14 @@ function openSettings() {
 $('settingsBtn').addEventListener('click', openSettings);
 $('closeSettings').addEventListener('click', () => { $('settings').hidden = true; });
 $('saveSettings').addEventListener('click', () => {
-  const keyChanged = $('key').value.trim() !== settings.key;
-  settings.key = $('key').value.trim();
+  const newKey = $('key').value.trim() || configKey;
+  const keyChanged = newKey !== settings.key;
+  settings.key = newKey;
   settings.geocoder = $('geocoder').value;
   settings.voice = $('voice').checked;
   settings.demo = $('demo').checked;
-  ['key', 'geocoder', 'voice', 'demo'].forEach((k) => store.set(k, settings[k]));
+  store.set('key', $('key').value.trim());
+  ['geocoder', 'voice', 'demo'].forEach((k) => store.set(k, settings[k]));
   $('settings').hidden = true;
   if (keyChanged) {
     if (map.getSource('flow')) { map.removeLayer('flow'); map.removeSource('flow'); }
