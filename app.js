@@ -32,15 +32,24 @@ const store = {
   set(k, v) { try { localStorage.setItem('nav.' + k, JSON.stringify(v)); } catch { /* stockage indisponible */ } },
 };
 const params = new URLSearchParams(location.search);
+// Clé TomTom : lien ?key=... > clé saisie dans ⚙ > fichier config.js
+const configKey = ((window.NAV_CONFIG && window.NAV_CONFIG.tomtomKey) || '').trim();
 const settings = {
-  key: params.get('key') || store.get('key', ''),
+  key: (params.get('key') || '').trim() || store.get('key', '') || configKey,
   geocoder: store.get('geocoder', 'fr'),
   voice: store.get('voice', true),
   demo: params.has('demo') || store.get('demo', false),
   flow: store.get('flow', false),
   is3d: store.get('is3d', true),
+  compact: store.get('compact', true),
 };
-if (params.get('key')) store.set('key', settings.key);
+if (params.get('key')) {
+  store.set('key', settings.key);
+  // On retire la clé de l'adresse : le favori enregistré ensuite reste propre.
+  params.delete('key');
+  const qs = params.toString();
+  try { history.replaceState(null, '', location.pathname + (qs ? '?' + qs : '') + location.hash); } catch { /* ignoré */ }
+}
 
 const $ = (id) => document.getElementById(id);
 
@@ -167,7 +176,11 @@ function moveCamera(force) {
     opts.zoom = state.speed > 25 ? 14.5 : state.speed > 14 ? 15.5 : 16.5;
     opts.pitch = settings.is3d ? 60 : 0;
     // Décale la voiture vers le bas de l'écran pour voir plus loin devant.
-    opts.offset = [0, map.getContainer().clientHeight * 0.2];
+    // Et vers la droite, pour qu'elle ne soit pas cachée par le panneau de gauche.
+    const w = map.getContainer().clientWidth;
+    const panelW = $('panel').offsetWidth + 16;
+    const dx = w > 900 ? panelW / 2 : 0;
+    opts.offset = [dx, map.getContainer().clientHeight * 0.2];
   }
   map.easeTo(opts);
 }
@@ -298,6 +311,8 @@ function setRoute(route) {
   state.spoken.clear();
   map.getSource('route').setData({ type: 'Feature', geometry: { type: 'LineString', coordinates: route.coords }, properties: {} });
   $('guidance').hidden = false;
+  $('guidance').classList.toggle('compact', settings.compact);
+  document.body.classList.add('navigating');
   setStatus('route', `${fmtDist(route.distance)} · ${fmtDuration(route.duration)}`);
   updateGuidance();
   refreshIncidents(true);
@@ -309,11 +324,19 @@ function stopRoute() {
   if (map.getSource('route')) map.getSource('route').setData(emptyFC());
   $('guidance').hidden = true;
   $('alert').hidden = true;
+  document.body.classList.remove('navigating');
   $('q').value = '';
   setStatus('route', '');
   map.easeTo({ pitch: settings.is3d ? 60 : 0, offset: [0, 0] });
 }
-$('stop').addEventListener('click', stopRoute);
+$('stop').addEventListener('click', (e) => { e.stopPropagation(); stopRoute(); });
+// Toucher la carte de guidage la réduit / l'agrandit (choix mémorisé).
+$('guidance').addEventListener('click', () => {
+  settings.compact = !settings.compact;
+  store.set('compact', settings.compact);
+  $('guidance').classList.toggle('compact', settings.compact);
+  if (state.follow) moveCamera(true);
+});
 
 const DIRS = {
   left: 'à gauche', right: 'à droite', 'slight left': 'légèrement à gauche', 'slight right': 'légèrement à droite',
@@ -375,6 +398,7 @@ function updateGuidance() {
     $('then').textContent = '';
     $('eta').textContent = fmtTime(new Date());
     $('remain').textContent = '0 m';
+    $('mini').textContent = 'Toucher pour arrêter';
     sayOnce('arrive', 'Vous êtes arrivé à destination');
     if (state.demoTimer) stopDemo();
     return;
@@ -388,6 +412,7 @@ function updateGuidance() {
   const secs = r.duration * (remaining / (r.distance || 1));
   $('eta').textContent = fmtTime(new Date(Date.now() + secs * 1000));
   $('remain').textContent = `${fmtDist(remaining)} · ${fmtDuration(secs)}`;
+  $('mini').textContent = `Arrivée ${$('eta').textContent} · ${$('remain').textContent}`;
 
   // Annonces vocales à 1 km, 300 m et juste avant la manœuvre.
   if (d < 60) sayOnce(`${idx}-now`, next.text);
@@ -535,8 +560,28 @@ $('toggleFlow').addEventListener('click', () => {
   if (!settings.key) { openSettings(); return; }
   setFlow(!settings.flow);
 });
+// Plein écran (si le navigateur le permet)
+{
+  const d = document, el = d.documentElement;
+  const req = el.requestFullscreen || el.webkitRequestFullscreen;
+  const exit = d.exitFullscreen || d.webkitExitFullscreen;
+  const isFs = () => !!(d.fullscreenElement || d.webkitFullscreenElement);
+  if (req && (d.fullscreenEnabled || d.webkitFullscreenEnabled)) {
+    $('fullscreen').hidden = false;
+    $('fullscreen').addEventListener('click', () => {
+      try {
+        const r = isFs() ? exit.call(d) : req.call(el);
+        if (r && r.catch) r.catch(() => setStatus('gps', 'Plein écran refusé par le navigateur'));
+      } catch { /* ignoré */ }
+    });
+    const sync = () => { $('fullscreen').classList.toggle('on', isFs()); setTimeout(() => map.resize(), 300); };
+    d.addEventListener('fullscreenchange', sync);
+    d.addEventListener('webkitfullscreenchange', sync);
+  }
+}
 function openSettings() {
-  $('key').value = settings.key;
+  $('key').value = settings.key === configKey ? '' : settings.key;
+  $('key').placeholder = configKey ? 'Clé du fichier config.js utilisée' : 'Collez votre clé ici';
   $('geocoder').value = settings.geocoder;
   $('voice').checked = settings.voice;
   $('demo').checked = settings.demo;
@@ -545,12 +590,14 @@ function openSettings() {
 $('settingsBtn').addEventListener('click', openSettings);
 $('closeSettings').addEventListener('click', () => { $('settings').hidden = true; });
 $('saveSettings').addEventListener('click', () => {
-  const keyChanged = $('key').value.trim() !== settings.key;
-  settings.key = $('key').value.trim();
+  const newKey = $('key').value.trim() || configKey;
+  const keyChanged = newKey !== settings.key;
+  settings.key = newKey;
   settings.geocoder = $('geocoder').value;
   settings.voice = $('voice').checked;
   settings.demo = $('demo').checked;
-  ['key', 'geocoder', 'voice', 'demo'].forEach((k) => store.set(k, settings[k]));
+  store.set('key', $('key').value.trim());
+  ['geocoder', 'voice', 'demo'].forEach((k) => store.set(k, settings[k]));
   $('settings').hidden = true;
   if (keyChanged) {
     if (map.getSource('flow')) { map.removeLayer('flow'); map.removeSource('flow'); }

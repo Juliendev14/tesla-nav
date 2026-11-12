@@ -25,11 +25,13 @@
         </div>
       </div>
       <div id="then"></div>
+      <div id="mini"></div>
       <div id="trip">
         <div><span class="label">Arrivée</span><span id="eta">--:--</span></div>
         <div><span class="label">Reste</span><span id="remain">--</span></div>
         <button id="stop" type="button">Arrêter</button>
       </div>
+      <div id="fold">▲ Réduire</div>
     </div>
 
     <div id="alert" hidden></div>
@@ -41,6 +43,7 @@
     <button id="recenter" type="button" title="Recentrer">◎</button>
     <button id="toggle3d" type="button" title="Vue 2D / 3D">2D</button>
     <button id="toggleFlow" type="button" title="Fluidité du trafic">Trafic</button>
+    <button id="fullscreen" type="button" title="Plein écran" hidden>⛶</button>
     <button id="settingsBtn" type="button" title="Réglages">⚙</button>
   </div>
 
@@ -69,6 +72,7 @@
   </div>
 
   <script src="https://unpkg.com/maplibre-gl@4.7.1/dist/maplibre-gl.js"></script>
+  <script src="config.js"></script>
   <script src="app.js"></script>
 </body>
 </html>

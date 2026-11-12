@@ -45,6 +45,21 @@ button { cursor: pointer; }
 #trip span:not(.label) { font-size: 24px; font-weight: 600; }
 #stop { margin-left: auto; height: 52px; padding: 0 20px; border-radius: 12px; border: 0; background: var(--danger); font-size: 18px; font-weight: 600; }
 
+/* En navigation : pas de barre de recherche */
+body.navigating #search, body.navigating #results { display: none; }
+#guidance { cursor: pointer; }
+#mini { display: none; color: var(--muted); font-size: 18px; margin-top: 4px; }
+#fold { color: var(--muted); font-size: 14px; text-align: center; margin-top: 10px; }
+/* Carte réduite : seulement la prochaine manœuvre */
+#guidance.compact { padding: 12px 14px; }
+#guidance.compact #next { gap: 14px; }
+#guidance.compact #next-icon { width: 60px; height: 60px; font-size: 38px; border-radius: 12px; }
+#guidance.compact #next-dist { font-size: 30px; }
+#guidance.compact #next-text { font-size: 18px; }
+#guidance.compact #then, #guidance.compact #trip, #guidance.compact #fold { display: none; }
+#guidance.compact #mini { display: block; }
+body.navigating #panel { width: 400px; }
+
 #alert { background: var(--warn); color: #1d1300; border-radius: var(--radius); padding: 16px 20px; font-size: 21px; font-weight: 600; }
 #alert.danger { background: var(--danger); color: #fff; }
 
