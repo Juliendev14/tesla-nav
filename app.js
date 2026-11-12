@@ -7,6 +7,8 @@
  *  - Itinéraire : serveur OSRM public (sans clé, usage raisonnable)
  *  - Adresses : Base Adresse Nationale (France) ou Photon (Europe)
  *  - Alertes : TomTom Traffic Incidents (clé gratuite)
+ *  - Limitations de vitesse : TomTom (sur l'itinéraire) ou OpenStreetMap (Overpass)
+ *  - Météo (pluie, brouillard) : Open-Meteo (sans clé)
  * ------------------------------------------------------------------ */
 
 const CFG = {
@@ -16,6 +18,8 @@ const CFG = {
     fr: 'https://api-adresse.data.gouv.fr/search/',
     eu: 'https://photon.komoot.io/api/',
   },
+  search: 'https://api.tomtom.com/search/2/search/',
+  ttRoute: 'https://api.tomtom.com/routing/1/calculateRoute/',
   incidents: 'https://api.tomtom.com/traffic/services/5/incidentDetails',
   flowTiles: 'https://api.tomtom.com/traffic/map/4/tile/flow/relative0/{z}/{x}/{y}.png',
   start: [2.3522, 48.8566], // Paris tant que le GPS n'a pas répondu
@@ -24,6 +28,11 @@ const CFG = {
   offRouteM: 50,
   alertAheadM: 5000,
   demoSpeed: 15, // m/s (~54 km/h)
+  overpass: ['https://overpass-api.de/api/interpreter', 'https://overpass.private.coffee/api/interpreter'],
+  meteo: 'https://api.open-meteo.com/v1/forecast',
+  osmRadiusM: 700, // zone de routes OpenStreetMap chargée autour de la voiture
+  weatherRefreshMs: 600000, // météo : toutes les 10 min (ou après 15 km)
+  exitZoneM: 900, // vue « sortie » à l'approche d'une sortie / bifurcation
 };
 
 /* ---------- Réglages enregistrés dans le navigateur ---------- */
@@ -42,6 +51,7 @@ const settings = {
   flow: store.get('flow', false),
   is3d: store.get('is3d', true),
   compact: store.get('compact', true),
+  wx: store.get('wx', 'auto'), // météo : auto / pluie forcée / sec forcé
 };
 if (params.get('key')) {
   store.set('key', settings.key);
@@ -120,9 +130,16 @@ const state = {
   follow: true,
   route: null, // { coords, cum, steps, distance, duration, dest }
   offCount: 0, lastReroute: 0,
+  avoid: [], // routes fermées à contourner pour le trajet en cours [[lon, lat]]
+  closureChecked: new Set(),
   spoken: new Set(),
   incidents: [], incidentMarkers: [], lastIncidentFetch: 0, lastIncidentCenter: null,
   demoTimer: null, demoAlong: 0,
+  along: null, // position le long de l'itinéraire (m), si on est dessus
+  exitMode: false,
+  limit: null, lastLimitSaid: null,
+  osm: { ways: [], center: null, at: 0, busy: false, cur: null },
+  weather: { wet: false, fog: false, at: 0, center: null, text: '' },
 };
 
 const meEl = document.createElement('div');
@@ -137,6 +154,12 @@ map.on('load', () => {
     paint: { 'line-color': '#0b3d91', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 6, 16, 16] } });
   map.addLayer({ id: 'route-line', type: 'line', source: 'route', layout: { 'line-join': 'round', 'line-cap': 'round' },
     paint: { 'line-color': '#3e8ef7', 'line-width': ['interpolate', ['linear'], ['zoom'], 10, 4, 16, 11] } });
+  // Branche de la prochaine sortie, mise en évidence en vue « sortie ».
+  map.addSource('maneuver', { type: 'geojson', data: emptyFC() });
+  map.addLayer({ id: 'maneuver-casing', type: 'line', source: 'maneuver', layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': '#0b3d91', 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 10, 18, 30] } });
+  map.addLayer({ id: 'maneuver-line', type: 'line', source: 'maneuver', layout: { 'line-join': 'round', 'line-cap': 'round' },
+    paint: { 'line-color': '#7fd3ff', 'line-width': ['interpolate', ['linear'], ['zoom'], 12, 6, 18, 20] } });
   map.addSource('incident-lines', { type: 'geojson', data: emptyFC() });
   map.addLayer({ id: 'incident-lines', type: 'line', source: 'incident-lines', layout: { 'line-cap': 'round' },
     paint: { 'line-color': ['match', ['get', 'mag'], 4, '#8b0000', 3, '#e5484d', 2, '#f76b15', 1, '#f5a524', '#b0b0b0'],
@@ -175,6 +198,12 @@ function moveCamera(force) {
   if (state.route) {
     opts.zoom = state.speed > 25 ? 14.5 : state.speed > 14 ? 15.5 : 16.5;
     opts.pitch = settings.is3d ? 60 : 0;
+    if (state.exitMode) {
+      // Vue « sortie » : on zoome et on incline pour bien voir la bretelle.
+      opts.zoom = state.speed > 25 ? 16.6 : 17.2;
+      opts.pitch = settings.is3d ? 72 : 0;
+      if (state.along != null) opts.bearing = bearing(state.pos, pointAt(state.route, state.along + 120));
+    }
     // Décale la voiture vers le bas de l'écran pour voir plus loin devant.
     // Et vers la droite, pour qu'elle ne soit pas cachée par le panneau de gauche.
     const w = map.getContainer().clientWidth;
@@ -198,8 +227,11 @@ function onPosition(lngLat, heading, speed) {
   $('speed-val').textContent = Math.round(state.speed * 3.6);
   store.set('lastPos', lngLat);
   if (state.route) updateGuidance();
+  else { state.along = null; setExitMode(false); }
   moveCamera(false);
   refreshIncidents(false);
+  refreshWeather(false);
+  updateLimit();
 }
 
 let gpsWatch = null;
@@ -216,57 +248,168 @@ function startGps() {
   );
 }
 
-/* ---------- Recherche d'adresse ---------- */
+/* ---------- Recherche d'adresse et de lieux ---------- */
 let searchTimer = null, searchSeq = 0;
+const DEFAULT_PLACEHOLDER = $('q').placeholder;
 $('q').addEventListener('input', () => {
   clearTimeout(searchTimer);
   const q = $('q').value.trim();
+  $('places').hidden = q.length > 0;
   if (q.length < 3) { $('results').innerHTML = ''; return; }
-  searchTimer = setTimeout(() => search(q), 300);
+  searchTimer = setTimeout(() => search(q), 700);
 });
 $('search').addEventListener('submit', (e) => { e.preventDefault(); const q = $('q').value.trim(); if (q) search(q); });
+
+// Trois sources interrogées en même temps, puis fusionnées :
+//  - TomTom (si clé) : lieux et commerces (« Enedis Caen », « Leclerc »…), triés près de vous
+//  - Photon (OpenStreetMap) : lieux et adresses, gratuit, sans clé
+//  - Base Adresse Nationale : adresses françaises précises (mode France)
+async function searchTomTom(q, near) {
+  if (!settings.key) return [];
+  const countries = settings.geocoder === 'fr' ? '&countrySet=FR' : '';
+  const url = `${CFG.search}${encodeURIComponent(q)}.json?key=${encodeURIComponent(settings.key)}&lat=${near[1]}&lon=${near[0]}&limit=8&language=fr-FR${countries}`;
+  const res = await fetch(url);
+  if (!res.ok) throw new Error('tomtom ' + res.status);
+  const data = await res.json();
+  return (data.results || []).map((r) => {
+    const a = r.address || {};
+    const isPoi = r.type === 'POI' && r.poi;
+    return {
+      label: isPoi ? r.poi.name : (a.freeformAddress || q),
+      sub: isPoi ? (a.freeformAddress || a.municipality || '') : [a.municipality, a.country].filter(Boolean).join(', '),
+      coord: [r.position.lon, r.position.lat],
+    };
+  });
+}
+async function searchPhoton(q, near) {
+  const url = `${CFG.geocoders.eu}?q=${encodeURIComponent(q)}&limit=6&lang=fr&lat=${near[1]}&lon=${near[0]}&location_bias_scale=0.5`;
+  const data = await (await fetch(url)).json();
+  return data.features.map((f) => {
+    const p = f.properties;
+    const street = [p.housenumber, p.street].filter(Boolean).join(' ');
+    const label = p.name || street || p.city;
+    const sub = [p.name ? street : '', p.postcode, p.city].filter(Boolean).join(' ');
+    return { label, sub, coord: f.geometry.coordinates };
+  });
+}
+async function searchBan(q, near) {
+  const url = `${CFG.geocoders.fr}?q=${encodeURIComponent(q)}&limit=5&lat=${near[1]}&lon=${near[0]}`;
+  const data = await (await fetch(url)).json();
+  return data.features.map((f) => ({ label: f.properties.label, sub: f.properties.context, coord: f.geometry.coordinates, score: f.properties.score }));
+}
 
 async function search(q) {
   const seq = ++searchSeq;
   const near = state.pos || map.getCenter().toArray();
-  try {
-    let items;
-    if (settings.geocoder === 'eu') {
-      const url = `${CFG.geocoders.eu}?q=${encodeURIComponent(q)}&limit=6&lang=fr&lat=${near[1]}&lon=${near[0]}`;
-      const data = await (await fetch(url)).json();
-      items = data.features.map((f) => {
-        const p = f.properties;
-        const line1 = [p.housenumber, p.street || p.name].filter(Boolean).join(' ') || p.name;
-        return { label: line1, sub: [p.postcode, p.city, p.country].filter(Boolean).join(' '), coord: f.geometry.coordinates };
-      });
-    } else {
-      const url = `${CFG.geocoders.fr}?q=${encodeURIComponent(q)}&limit=6&lat=${near[1]}&lon=${near[0]}`;
-      const data = await (await fetch(url)).json();
-      items = data.features.map((f) => ({ label: f.properties.label, sub: f.properties.context, coord: f.geometry.coordinates }));
-    }
-    if (seq !== searchSeq) return;
-    const ul = $('results');
-    ul.innerHTML = items.length ? '' : '<li>Aucun résultat</li>';
-    items.forEach((it) => {
-      const li = document.createElement('li');
-      li.innerHTML = `${esc(it.label)}<small>${esc(it.sub)}</small>`;
-      li.addEventListener('click', () => {
-        ul.innerHTML = '';
-        $('q').value = it.label;
-        $('q').blur();
-        startRoute(it.coord, it.label);
-      });
-      ul.appendChild(li);
-    });
-  } catch (e) {
-    console.warn(e);
+  const jobs = [searchTomTom(q, near), searchPhoton(q, near)];
+  if (settings.geocoder === 'fr') jobs.push(searchBan(q, near));
+  const results = await Promise.allSettled(jobs);
+  if (seq !== searchSeq) return;
+  const [tt, ph, ban] = results.map((r) => (r.status === 'fulfilled' ? r.value : []));
+  if (results.every((r) => r.status === 'rejected')) {
     $('results').innerHTML = '<li>Recherche impossible (réseau ?)</li>';
+    return;
   }
+  // Adresses BAN sûres d'abord (numéro + rue), puis lieux TomTom, puis OpenStreetMap.
+  const goodBan = (ban || []).filter((x) => x.score > 0.6);
+  const merged = [...goodBan, ...tt, ...ph, ...(ban || []).filter((x) => x.score <= 0.6)];
+  const items = [];
+  for (const it of merged) {
+    if (!it.label || !it.coord) continue;
+    if (items.some((o) => dist(o.coord, it.coord) < 150 && o.label.toLowerCase() === it.label.toLowerCase())) continue;
+    items.push(it);
+    if (items.length >= 8) break;
+  }
+  const ul = $('results');
+  ul.innerHTML = items.length ? '' : '<li>Aucun résultat</li>';
+  items.forEach((it) => {
+    const li = document.createElement('li');
+    const km = fmtDist(dist(near, it.coord));
+    li.innerHTML = `${esc(it.label)}<small>${esc(it.sub || '')} · ${esc(km)}</small><button type="button" class="fav-btn" title="Enregistrer">☆</button>`;
+    li.querySelector('.fav-btn').addEventListener('click', (e) => { e.stopPropagation(); openFavSheet(it); });
+    li.addEventListener('click', () => {
+      ul.innerHTML = '';
+      $('q').blur();
+      if (state.pendingFav) { saveFav(state.pendingFav, it); $('q').value = ''; return; }
+      $('q').value = it.label;
+      startRoute(it.coord, it.label);
+    });
+    ul.appendChild(li);
+  });
 }
+
+/* ---------- Lieux favoris (enregistrés dans le navigateur de la voiture) ---------- */
+const FAV_ICONS = { domicile: '🏠', travail: '💼' };
+const favIcon = (name) => FAV_ICONS[name.toLowerCase()] || '⭐';
+function getFavs() { return store.get('places', []); }
+function saveFav(name, it) {
+  name = name.trim();
+  if (!name) return;
+  const favs = getFavs().filter((f) => f.name.toLowerCase() !== name.toLowerCase());
+  favs.push({ name, label: it.label, sub: it.sub || '', coord: it.coord });
+  store.set('places', favs);
+  state.pendingFav = null;
+  $('q').placeholder = DEFAULT_PLACEHOLDER;
+  renderFavs();
+  setStatus('route', `${favIcon(name)} ${name} enregistré`);
+}
+function renderFavs() {
+  const ul = $('places');
+  ul.innerHTML = '';
+  const favs = getFavs();
+  // Domicile et Travail toujours proposés, même pas encore définis.
+  ['Domicile', 'Travail'].forEach((n) => {
+    if (!favs.some((f) => f.name.toLowerCase() === n.toLowerCase())) favs.push({ name: n, todo: true });
+  });
+  const order = (f) => ({ domicile: 0, travail: 1 }[f.name.toLowerCase()] ?? 2);
+  favs.sort((a, b) => order(a) - order(b) || a.name.localeCompare(b.name, 'fr'));
+  favs.forEach((f) => {
+    const li = document.createElement('li');
+    if (f.todo) {
+      li.className = 'todo';
+      li.innerHTML = `${favIcon(f.name)} ${esc(f.name)}<small>Toucher pour définir l'adresse</small>`;
+      li.addEventListener('click', () => askFavAddress(f.name));
+      ul.appendChild(li);
+      return;
+    }
+    li.innerHTML = `${favIcon(f.name)} ${esc(f.name)}<small>${esc(f.label)}</small><button type="button" class="del-btn" title="Supprimer">✕</button>`;
+    li.addEventListener('click', () => { $('places').hidden = true; startRoute(f.coord, f.name); });
+    li.querySelector('.del-btn').addEventListener('click', (e) => {
+      e.stopPropagation();
+      if (!confirm(`Supprimer « ${f.name} » ?`)) return;
+      store.set('places', getFavs().filter((x) => x.name !== f.name));
+      renderFavs();
+    });
+    ul.appendChild(li);
+  });
+}
+function askFavAddress(name) {
+  state.pendingFav = name;
+  $('q').value = '';
+  $('q').placeholder = `Adresse de « ${name} » ?`;
+  $('q').focus();
+}
+let favTarget = null;
+function openFavSheet(it) {
+  favTarget = it;
+  $('favWhat').textContent = `${it.label}${it.sub ? ' · ' + it.sub : ''}`;
+  $('favName').value = '';
+  $('favSheet').hidden = false;
+}
+document.querySelectorAll('#favSheet [data-fav]').forEach((b) => b.addEventListener('click', () => {
+  saveFav(b.dataset.fav, favTarget); $('favSheet').hidden = true;
+}));
+$('favSave').addEventListener('click', () => {
+  if (!$('favName').value.trim()) { $('favName').focus(); return; }
+  saveFav($('favName').value, favTarget); $('favSheet').hidden = true;
+});
+$('favCancel').addEventListener('click', () => { $('favSheet').hidden = true; });
 
 /* ---------- Itinéraire ---------- */
 async function startRoute(dest, label) {
   const from = state.pos || map.getCenter().toArray();
+  state.avoid = [];
+  state.closureChecked.clear();
   setStatus('route', 'Calcul de l\'itinéraire…');
   try {
     const route = await fetchRoute(from, dest);
@@ -284,25 +427,114 @@ async function startRoute(dest, label) {
   }
 }
 
+// Itinéraire : TomTom (trafic en temps réel, évite les routes fermées) si une clé est
+// configurée, sinon OSRM (gratuit, sans trafic).
 async function fetchRoute(from, dest) {
+  if (settings.key) {
+    try { return await fetchRouteTomTom(from, dest); } catch (e) { console.warn('TomTom routing', e); }
+  }
+  return fetchRouteOsrm(from, dest);
+}
+
+function lineFrom(coords) {
+  const cum = [0];
+  for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + dist(coords[i - 1], coords[i]));
+  return { coords, cum };
+}
+
+async function fetchRouteTomTom(from, dest) {
+  // Limitations de vitesse et voies (flèches) demandées en plus ; si TomTom refuse, on réessaie sans.
+  const base = `${CFG.ttRoute}${from[1]},${from[0]}:${dest[1]},${dest[0]}/json?key=${encodeURIComponent(settings.key)}`
+    + '&traffic=true&travelMode=car&routeType=fastest&instructionsType=text&language=fr-FR&routeRepresentation=polyline';
+  const extras = ['&sectionType=speedLimit&sectionType=lanes', '&sectionType=speedLimit', ''];
+  const opts = {};
+  if (state.avoid.length) {
+    // Petit rectangle (~150 m) autour de chaque fermeture.
+    const rectangles = state.avoid.map(([lon, lat]) => {
+      const dLat = 0.0013, dLon = 0.0013 / Math.cos(rad(lat));
+      return { southWestCorner: { latitude: lat - dLat, longitude: lon - dLon }, northEastCorner: { latitude: lat + dLat, longitude: lon + dLon } };
+    });
+    opts.method = 'POST';
+    opts.headers = { 'Content-Type': 'application/json' };
+    opts.body = JSON.stringify({ avoidAreas: { rectangles } });
+  }
+  let res;
+  for (const extra of extras) {
+    res = await fetch(base + extra, opts);
+    if (res.status !== 400) break;
+  }
+  if (!res.ok) throw new Error('tomtom ' + res.status);
+  const data = await res.json();
+  const r = data.routes && data.routes[0];
+  if (!r) throw new Error('aucun itinéraire');
+  const coords = [];
+  r.legs.forEach((leg) => leg.points.forEach((pt) => coords.push([pt.longitude, pt.latitude])));
+  const line = lineFrom(coords);
+  const total = r.summary.lengthInMeters || line.cum[line.cum.length - 1];
+  const scale = line.cum[line.cum.length - 1] / (total || 1);
+  const steps = ((r.guidance && r.guidance.instructions) || [])
+    .filter((i) => i.message && i.maneuver !== 'DEPART')
+    .map((i) => ({
+      along: (i.routeOffsetInMeters || 0) * scale, text: i.message, icon: ttIcon(i.maneuver),
+      exit: TT_EXITS.test(i.maneuver || '') || i.junctionType === 'BIFURCATION',
+      sign: { num: i.exitNumber || '', towards: i.signpostText || '', roads: (i.roadNumbers || []).join(' · '), motorway: !!i.exitNumber || /MOTORWAY/.test(i.maneuver || '') },
+    }));
+  // Sections : limitations de vitesse et voies, repérées par index de points du tracé.
+  const at = (idx) => line.cum[Math.max(0, Math.min(line.cum.length - 1, idx || 0))];
+  const speeds = [], lanes = [];
+  (r.sections || []).forEach((s) => {
+    if (s.sectionType === 'SPEED_LIMIT' && s.maxSpeedLimitInKmh) {
+      speeds.push({ from: at(s.startPointIndex), to: at(s.endPointIndex), kmh: s.maxSpeedLimitInKmh });
+    } else if (s.sectionType === 'LANES' && Array.isArray(s.lanes) && s.lanes.length > 1) {
+      lanes.push({ from: at(s.startPointIndex), to: at(s.endPointIndex),
+        lanes: s.lanes.map((l) => ({ dirs: (l.directions || []).map(normDir), ok: !!l.follow })) });
+    }
+  });
+  return { ...line, steps, speeds, lanes, distance: total, duration: r.summary.travelTimeInSeconds, dest, source: 'tomtom' };
+}
+const TT_EXITS = /EXIT|KEEP_|BEAR_|SWITCH_|TAKE_RAMP|FORK/;
+// Direction d'une voie, au format commun : 'straight', 'slight right', 'left'…
+const normDir = (d) => String(d || '').toLowerCase().replace(/_/g, ' ').replace('u turn', 'uturn');
+function ttIcon(m = '') {
+  if (m === 'ARRIVE' || m.startsWith('ARRIVE')) return '⚑';
+  if (m.includes('ROUNDABOUT')) return '⟳';
+  if (m.includes('UTURN')) return '↶';
+  if (m === 'SHARP_LEFT') return '↙';
+  if (m === 'SHARP_RIGHT') return '↘';
+  if (m === 'TURN_LEFT') return '←';
+  if (m === 'TURN_RIGHT') return '→';
+  if (m.includes('LEFT')) return '↖';
+  if (m.includes('RIGHT')) return '↗';
+  return '↑';
+}
+
+async function fetchRouteOsrm(from, dest) {
   const url = `${CFG.osrm}${from[0]},${from[1]};${dest[0]},${dest[1]}?overview=full&geometries=geojson&steps=true`;
   const data = await (await fetch(url)).json();
   if (data.code !== 'Ok' || !data.routes.length) throw new Error(data.message || data.code);
   const r = data.routes[0];
-  const coords = r.geometry.coordinates;
-  const cum = [0];
-  for (let i = 1; i < coords.length; i++) cum.push(cum[i - 1] + dist(coords[i - 1], coords[i]));
-  const line = { coords, cum };
+  const line = lineFrom(r.geometry.coordinates);
+  const cum = line.cum;
   // Position de chaque manœuvre le long du tracé.
   const steps = [];
   let acc = 0;
   r.legs.forEach((leg) => leg.steps.forEach((s) => {
-    steps.push({ ...s, along: acc, text: instruction(s), icon: icon(s) });
+    const t = s.maneuver.type;
+    steps.push({ ...s, along: acc, text: instruction(s), icon: icon(s),
+      exit: t === 'off ramp' || t === 'fork',
+      sign: { num: s.exits ? String(s.exits).split(';')[0] : '', towards: s.destinations ? s.destinations.split(':').pop().trim() : '',
+        roads: s.ref || '', motorway: !!s.exits } });
     acc += s.distance;
   }));
   const scale = cum[cum.length - 1] / (acc || 1); // aligne nos distances sur celles d'OSRM
   steps.forEach((s) => { s.along *= scale; });
-  return { ...line, steps, distance: r.distance, duration: r.duration, dest };
+  // Voies (flèches) au carrefour de chaque manœuvre, affichées dans les 600 m avant.
+  const lanes = [];
+  steps.forEach((s) => {
+    const l = s.intersections && s.intersections[0] && s.intersections[0].lanes;
+    if (l && l.length > 1) lanes.push({ from: s.along - 600, to: s.along, lanes: l.map((x) => ({ dirs: x.indications || [], ok: !!x.valid })) });
+  });
+  return { ...line, steps, lanes, speeds: [], distance: r.distance, duration: r.duration, dest, source: 'osrm' };
 }
 
 function setRoute(route) {
@@ -316,19 +548,42 @@ function setRoute(route) {
   setStatus('route', `${fmtDist(route.distance)} · ${fmtDuration(route.duration)}`);
   updateGuidance();
   refreshIncidents(true);
+  keepAwake(true);
 }
 
 function stopRoute() {
   state.route = null;
   stopDemo();
   if (map.getSource('route')) map.getSource('route').setData(emptyFC());
+  state.along = null;
+  setExitMode(false);
+  $('lanes').innerHTML = '';
   $('guidance').hidden = true;
   $('alert').hidden = true;
   document.body.classList.remove('navigating');
   $('q').value = '';
+  $('places').hidden = false;
   setStatus('route', '');
   map.easeTo({ pitch: settings.is3d ? 60 : 0, offset: [0, 0] });
+  keepAwake(false);
 }
+
+// Écran toujours allumé pendant le guidage (téléphone, tablette).
+// Le navigateur relâche ce verrou quand on change d'appli : on le reprend au retour.
+let wakeLock = null;
+async function keepAwake(on) {
+  if (!('wakeLock' in navigator)) return;
+  try {
+    if (on && !wakeLock && document.visibilityState === 'visible') {
+      wakeLock = await navigator.wakeLock.request('screen');
+      wakeLock.addEventListener('release', () => { wakeLock = null; });
+    } else if (!on && wakeLock) {
+      await wakeLock.release();
+      wakeLock = null;
+    }
+  } catch { /* refusé (batterie faible…) : on n'insiste pas */ }
+}
+document.addEventListener('visibilitychange', () => { if (state.route) keepAwake(true); });
 $('stop').addEventListener('click', (e) => { e.stopPropagation(); stopRoute(); });
 // Toucher la carte de guidage la réduit / l'agrandit (choix mémorisé).
 $('guidance').addEventListener('click', () => {
@@ -389,6 +644,7 @@ function updateGuidance() {
     }
   } else state.offCount = 0;
 
+  state.along = p.d <= CFG.offRouteM ? p.along : null;
   const remaining = Math.max(0, r.cum[r.cum.length - 1] - p.along);
   const idx = r.steps.findIndex((s) => s.along > p.along + 5);
   if (idx === -1 || remaining < 25) {
@@ -400,6 +656,8 @@ function updateGuidance() {
     $('remain').textContent = '0 m';
     $('mini').textContent = 'Toucher pour arrêter';
     sayOnce('arrive', 'Vous êtes arrivé à destination');
+    setExitMode(false);
+    $('lanes').innerHTML = '';
     if (state.demoTimer) stopDemo();
     return;
   }
@@ -420,7 +678,205 @@ function updateGuidance() {
   else if (d < 1000 && d > 800) sayOnce(`${idx}-1000`, `Dans 1 kilomètre, ${lower(next.text)}`);
 
   updateRouteAlert(p.along);
+  updateLanes(p.along);
+  // Vue « sortie » : à l'approche d'une sortie ou bifurcation, et 150 m après.
+  const prev = r.steps[idx - 1];
+  const exitStep = next.exit && d < CFG.exitZoneM ? next : prev && prev.exit && p.along - prev.along < 150 ? prev : null;
+  setExitMode(!!exitStep && state.along != null, exitStep, next === exitStep ? d : 0);
 }
+
+/* ---------- Voies et vue « sortie » ---------- */
+const LANE_ARROWS = { straight: '↑', 'slight right': '↗', right: '→', 'sharp right': '↘', 'slight left': '↖', left: '←', 'sharp left': '↙', uturn: '↶', none: '↑', '': '↑' };
+function updateLanes(along) {
+  const r = state.route;
+  const entry = (r.lanes || []).find((l) => along >= l.from - 300 && along <= l.to);
+  const el = $('lanes');
+  const key = entry ? r.lanes.indexOf(entry) : -1;
+  if (el.dataset.key === String(key)) return;
+  el.dataset.key = String(key);
+  el.innerHTML = entry ? entry.lanes.map((l) => {
+    const arrows = [...new Set((l.dirs.length ? l.dirs : ['straight']).map((d) => LANE_ARROWS[d] || '↑'))].join('');
+    return `<span class="lane${l.ok ? ' ok' : ''}">${esc(arrows)}</span>`;
+  }).join('') : '';
+}
+
+let exitKey = null;
+function setExitMode(on, step, d) {
+  const was = state.exitMode;
+  state.exitMode = on;
+  document.body.classList.toggle('exit-mode', on);
+  $('junction').hidden = !on;
+  if (!on) {
+    exitKey = null;
+    if (map.getSource('maneuver')) map.getSource('maneuver').setData(emptyFC());
+    if (was && state.follow) moveCamera(true);
+    return;
+  }
+  const r = state.route;
+  if (exitKey !== step) {
+    exitKey = step;
+    const s = step.sign || {};
+    $('junction').classList.toggle('motorway', !!s.motorway);
+    $('j-num').textContent = s.num ? `Sortie ${s.num}` : (step.icon || '↗');
+    $('j-num').hidden = false;
+    $('j-towards').textContent = s.towards || step.text;
+    $('j-roads').textContent = s.roads || '';
+    // Tronçon à surligner : de 200 m avant la sortie à 350 m après.
+    const pts = [];
+    for (let a = Math.max(0, step.along - 200); a <= step.along + 350; a += 10) pts.push(pointAt(r, a));
+    if (map.getSource('maneuver')) map.getSource('maneuver').setData({ type: 'Feature', properties: {}, geometry: { type: 'LineString', coordinates: pts } });
+    if (state.follow) moveCamera(true);
+  }
+  $('j-bar').style.width = `${Math.max(0, Math.min(100, 100 * (1 - d / CFG.exitZoneM)))}%`;
+  $('j-dist').textContent = d > 20 ? fmtDist(d) : 'Maintenant';
+}
+
+/* ---------- Limitation de vitesse (TomTom / OpenStreetMap) et météo ---------- */
+// France métropolitaine (approximatif) : règles « par temps de pluie » du Code de la route.
+const inFrance = (p) => p && p[0] > -5.3 && p[0] < 8.3 && p[1] > 42.3 && p[1] < 51.1;
+// Pluie (ou autres précipitations) : 130 → 110, 110 → 100, 90 → 80. Brouillard (< 50 m) : 50.
+function wetLimit(kmh) {
+  if (kmh >= 130) return 110;
+  if (kmh === 110) return 100;
+  if (kmh === 90) return 80;
+  return kmh;
+}
+function isWet() { return settings.wx === 'rain' || (settings.wx === 'auto' && state.weather.wet); }
+
+function updateLimit() {
+  const base = baseLimit();
+  let kmh = base, reason = '';
+  if (base && inFrance(state.pos)) {
+    if (isWet() && wetLimit(base) < base) { kmh = wetLimit(base); reason = 'pluie'; }
+    if (settings.wx === 'auto' && state.weather.fog && kmh > 50) { kmh = 50; reason = 'brouillard'; }
+  }
+  state.limit = kmh || null;
+  const el = $('limit');
+  el.hidden = !kmh;
+  $('speed').classList.toggle('over', !!kmh && state.speed * 3.6 > kmh + 3);
+  if (!kmh) return;
+  $('limit-val').textContent = kmh;
+  el.classList.toggle('wet', !!reason);
+  $('limit-note').textContent = reason === 'pluie' ? `🌧 ${base}→${kmh}` : reason === 'brouillard' ? '🌫 brouillard' : '';
+  const said = `${kmh}-${reason}`;
+  if (reason && state.lastLimitSaid !== said) speak(`${reason === 'pluie' ? 'Pluie' : 'Brouillard'} : vitesse limitée à ${kmh}`);
+  state.lastLimitSaid = said;
+}
+
+function baseLimit() {
+  const r = state.route;
+  if (r && state.along != null && r.speeds && r.speeds.length) {
+    const s = r.speeds.find((x) => state.along >= x.from && state.along < x.to);
+    if (s) return s.kmh;
+  }
+  if (!state.pos) return null;
+  refreshOsm();
+  return osmLimit();
+}
+
+// Routes OpenStreetMap autour de la voiture (avec leur « maxspeed »), rechargées en roulant.
+async function refreshOsm() {
+  const o = state.osm, pos = state.pos;
+  if (o.busy || Date.now() - o.at < 8000) return;
+  if (o.center && dist(o.center, pos) < CFG.osmRadiusM * 0.55) return;
+  o.busy = true;
+  o.at = Date.now();
+  const q = `[out:json][timeout:15];way(around:${CFG.osmRadiusM},${pos[1].toFixed(5)},${pos[0].toFixed(5)})`
+    + '[highway~"^(motorway|trunk|primary|secondary|tertiary|unclassified|residential|living_street)(_link)?$"];out tags geom;';
+  try {
+    let data = null;
+    for (const url of CFG.overpass) {
+      try {
+        const res = await fetch(url, { method: 'POST', body: 'data=' + encodeURIComponent(q), headers: { 'Content-Type': 'application/x-www-form-urlencoded' } });
+        if (res.ok) { data = await res.json(); break; }
+      } catch { /* serveur suivant */ }
+    }
+    if (!data) return;
+    o.ways = (data.elements || []).filter((w) => w.geometry && w.geometry.length > 1)
+      .map((w) => ({ tags: w.tags || {}, line: lineFrom(w.geometry.map((g) => [g.lon, g.lat])) }));
+    o.center = pos;
+    updateLimit();
+  } finally { o.busy = false; }
+}
+
+function osmLimit() {
+  const pos = state.pos;
+  let best = null;
+  for (const w of state.osm.ways) {
+    const p = project(pos, w.line);
+    if (p.d > 30) continue;
+    const c = w.line.coords;
+    const segB = bearing(c[p.i], c[p.i + 1] || c[p.i]);
+    const diff = Math.abs(((state.heading - segB) % 360 + 540) % 360 - 180); // 0 = même sens
+    const oneway = ['yes', '1', 'true'].includes(w.tags.oneway) || /motorway/.test(w.tags.highway);
+    let score = p.d;
+    if (state.speed > 2) {
+      const aligned = diff < 60 || (!oneway && diff > 120);
+      if (!aligned) score += 40;
+    }
+    if (w === state.osm.cur) score -= 5; // évite de sauter d'une route à l'autre
+    if (!best || score < best.score) best = { w, score, forward: diff < 90 };
+  }
+  if (!best) return null;
+  state.osm.cur = best.w;
+  const t = best.w.tags;
+  const dirTag = best.forward ? t['maxspeed:forward'] : t['maxspeed:backward'];
+  return parseMaxspeed(dirTag || t.maxspeed || t['zone:maxspeed'], t.highway);
+}
+
+function parseMaxspeed(v, highway) {
+  if (v) {
+    const s = String(v).split(';')[0].trim();
+    const zones = { 'FR:urban': 50, 'FR:rural': 80, 'FR:motorway': 130, 'FR:zone30': 30, 'FR:30': 30, 'FR:walk': 20, 'FR:living_street': 20 };
+    if (zones[s]) return zones[s];
+    const m = s.match(/^(\d+)\s*(mph)?$/);
+    if (m) return m[2] ? Math.round(+m[1] * 1.609) : +m[1];
+    return null; // « none », « signals »… : on n'affiche rien
+  }
+  if (highway === 'motorway' && inFrance(state.pos)) return 130;
+  if (highway === 'living_street') return 20;
+  return null;
+}
+
+// Météo actuelle (Open-Meteo) : pluie, neige, brouillard.
+async function refreshWeather(force) {
+  const w = state.weather, pos = state.pos;
+  if (!pos || w.busy) return;
+  if (!force && w.center && Date.now() - w.at < CFG.weatherRefreshMs && dist(w.center, pos) < 15000) return;
+  w.busy = true;
+  w.at = Date.now();
+  w.center = pos;
+  try {
+    const url = `${CFG.meteo}?latitude=${pos[1].toFixed(3)}&longitude=${pos[0].toFixed(3)}&current=precipitation,weather_code,visibility`;
+    const c = (await (await fetch(url)).json()).current || {};
+    const code = c.weather_code || 0;
+    // Codes WMO : 51-67 bruine/pluie, 71-77 neige, 80-86 averses, 95-99 orages.
+    w.wet = (c.precipitation || 0) >= 0.1 || (code >= 51 && code <= 67) || (code >= 71 && code <= 86) || code >= 95;
+    w.fog = typeof c.visibility === 'number' && c.visibility < 50;
+    w.text = w.fog ? '🌫 Brouillard' : w.wet ? '🌧 Pluie' : '☀ Sec';
+  } catch (e) {
+    console.warn('Météo', e);
+    w.text = '';
+  } finally { w.busy = false; }
+  showWeather();
+  updateLimit();
+}
+function showWeather() {
+  const auto = state.weather.text ? `Météo : ${state.weather.text}` : '';
+  const txt = settings.wx === 'rain' ? 'Météo : 🌧 pluie (manuel)' : settings.wx === 'dry' ? 'Météo : ☀ sec (manuel)' : auto;
+  setStatus('wx', txt);
+  const b = $('toggleWx');
+  b.textContent = settings.wx === 'rain' ? '🌧' : settings.wx === 'dry' ? '☀' : isWet() ? '🌧' : '☀';
+  b.classList.toggle('on', settings.wx !== 'auto');
+  b.title = settings.wx === 'auto' ? 'Météo automatique' : 'Météo forcée (toucher pour changer)';
+}
+// Bouton météo : automatique → pluie forcée → sec forcé → automatique.
+$('toggleWx').addEventListener('click', () => {
+  settings.wx = { auto: 'rain', rain: 'dry', dry: 'auto' }[settings.wx] || 'auto';
+  store.set('wx', settings.wx);
+  showWeather();
+  updateLimit();
+});
 const lower = (s) => s.charAt(0).toLowerCase() + s.slice(1);
 
 /* ---------- Voix ---------- */
@@ -512,9 +968,30 @@ function updateRouteAlert(myAlong) {
   if (!best) { el.hidden = true; return; }
   const { inc, ahead } = best;
   el.hidden = false;
+  if (inc.cat === 8) avoidClosure(inc);
   el.className = [1, 8, 5].includes(inc.cat) || inc.mag >= 3 ? 'danger' : '';
   el.textContent = `${inc.emoji} ${inc.name} ${ahead > 30 ? 'dans ' + fmtDist(ahead) : 'ici'}${inc.road ? ' · ' + inc.road : ''}${inc.delay ? ' · +' + fmtDuration(inc.delay) : ''}`;
   if (ahead < 1500) sayOnce(`inc-${inc.id}`, `Attention, ${inc.name.toLowerCase()} dans ${fmtDist(ahead)}`);
+}
+
+// Route fermée sur l'itinéraire : on demande à TomTom un trajet qui l'évite.
+async function avoidClosure(inc) {
+  if (!settings.key || state.closureChecked.has(inc.id)) return;
+  state.closureChecked.add(inc.id);
+  const r = state.route;
+  const pts = inc.line ? [inc.line[0], inc.line[Math.floor(inc.line.length / 2)], inc.line[inc.line.length - 1]] : [inc.pts[0]];
+  state.avoid.push(...pts);
+  try {
+    const nr = await fetchRouteTomTom(state.pos || r.coords[0], r.dest);
+    if (state.route !== r) return; // trajet arrêté ou déjà recalculé entre-temps
+    const stillBlocked = pts.some((pt) => project(pt, nr).d < 40);
+    if (stillBlocked) { sayOnce(`closure-none-${inc.id}`, 'Route fermée devant, pas d\'autre itinéraire trouvé'); return; }
+    nr.label = r.label;
+    setRoute(nr);
+    speak(`Route fermée devant. Nouvel itinéraire, arrivée à ${fmtTime(new Date(Date.now() + nr.duration * 1000))}`);
+  } catch (e) {
+    console.warn(e);
+  }
 }
 
 function setFlow(on) {
@@ -611,10 +1088,12 @@ $('saveSettings').addEventListener('click', () => {
 const statusParts = {};
 function setStatus(k, text) {
   statusParts[k] = text;
-  $('status').innerHTML = ['gps', 'route', 'inc'].filter((x) => statusParts[x]).map((x) => `<span>${esc(statusParts[x])}</span>`).join('');
+  $('status').innerHTML = ['gps', 'route', 'wx', 'inc'].filter((x) => statusParts[x]).map((x) => `<span>${esc(statusParts[x])}</span>`).join('');
 }
 
 $('toggle3d').textContent = settings.is3d ? '2D' : '3D';
 $('recenter').classList.add('on');
 setStatus('gps', 'Recherche GPS…');
 startGps();
+renderFavs();
+showWeather();

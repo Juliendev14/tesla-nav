@@ -55,7 +55,20 @@ Autres façons (facultatif) :
   Autre astuce connue des possesseurs de Tesla, sans garantie : ouvrir
   `youtube.com/redirect?q=https://juliendev14.github.io/tesla-nav/` puis toucher le lien ;
   la page s'ouvre alors en plein écran. Mettre cette adresse en favori.
+- Favoris : 🏠 Domicile et 💼 Travail apparaissent sous la recherche (toucher pour définir l'adresse).
+  Pour enregistrer un autre lieu, toucher ☆ à droite d'un résultat de recherche et lui donner un nom.
+  Les favoris sont gardés dans le navigateur de la voiture.
+- Avec la clé TomTom, l'itinéraire tient compte du trafic et contourne automatiquement une route fermée signalée devant vous.
 - Mode démo (⚙) : simule le trajet pour tester à l'arrêt.
+- Limitation de vitesse : panneau rond à côté du compteur. Sur l'itinéraire TomTom, elle vient de TomTom ;
+  sinon d'OpenStreetMap (gratuit, parfois incomplet : le panneau disparaît si la route n'est pas renseignée).
+  Le compteur passe au rouge au-delà de la limite.
+- Météo (Open-Meteo, gratuit) : s'il pleut (ou neige), la limite affichée suit le Code de la route :
+  130 → 110, 110 → 100, 90 → 80 (80 et moins : inchangé). Brouillard < 50 m : 50.
+  Bouton 🌧/☀ à droite : automatique → pluie forcée → sec forcé.
+- Sorties d'autoroute / voies rapides : vers 900 m avant, la carte zoome et s'incline sur la bretelle,
+  qui est surlignée, avec un panneau « Sortie n° / direction » et les flèches de voies (blanches = voies à prendre).
+  Ce n'est pas une photo réelle de l'échangeur (ces images sont payantes), c'est la carte 3D agrandie.
 
 ## Légal
 

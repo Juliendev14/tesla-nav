@@ -29,7 +29,21 @@ button { cursor: pointer; }
 #results li { padding: 16px 20px; font-size: 20px; border-bottom: 1px solid var(--line); cursor: pointer; }
 #results li:last-child { border-bottom: 0; }
 #results li small { display: block; color: var(--muted); font-size: 15px; margin-top: 2px; }
-#results li:active { background: #26303c; }
+#results li:active, #places li:active { background: #26303c; }
+#results li, #places li { position: relative; padding-right: 72px; }
+.fav-btn, .del-btn { position: absolute; right: 8px; top: 50%; transform: translateY(-50%); width: 56px; height: 56px;
+  border: 0; border-radius: 12px; background: transparent; font-size: 26px; color: var(--muted); }
+.fav-btn:active, .del-btn:active { background: #303a47; }
+#places { list-style: none; margin: 0; padding: 0; background: var(--panel); border-radius: var(--radius); overflow: hidden; max-height: 50vh; overflow-y: auto; }
+#places:empty, #places[hidden] { display: none; }
+#places li { padding: 14px 20px; font-size: 20px; border-bottom: 1px solid var(--line); cursor: pointer; }
+#places li:last-child { border-bottom: 0; }
+#places li small { display: block; color: var(--muted); font-size: 15px; margin-top: 2px; }
+#places li.todo { color: var(--muted); }
+body.navigating #places { display: none; }
+#favSheet { position: fixed; inset: 0; background: rgba(0, 0, 0, 0.6); display: grid; place-items: center; z-index: 10; }
+#favSheet[hidden] { display: none; }
+.sheet .row.left { justify-content: flex-start; }
 
 #guidance { background: var(--panel); border-radius: var(--radius); padding: 18px; }
 #next { display: flex; gap: 18px; align-items: center; }
@@ -69,6 +83,39 @@ body.navigating #panel { width: 400px; }
   align-items: center; justify-content: center; z-index: 2; }
 #speed-val { font-size: 34px; font-weight: 700; line-height: 1; }
 #speed small { color: var(--muted); font-size: 13px; }
+
+#speed.over { background: var(--danger); border-color: var(--danger); }
+#speed.over small { color: #fff; }
+
+/* Panneau de limitation de vitesse */
+#limit { position: absolute; left: 124px; bottom: 56px; display: flex; flex-direction: column; align-items: center; gap: 4px; z-index: 2; }
+#limit-sign { width: 96px; height: 96px; border-radius: 50%; background: #fff; border: 11px solid #d8232a;
+  display: grid; place-items: center; box-shadow: 0 2px 8px rgba(0, 0, 0, 0.5); }
+#limit-val { color: #111; font-size: 36px; font-weight: 800; letter-spacing: -1px; line-height: 1; }
+#limit-note { font-size: 15px; font-weight: 600; color: #fff; background: rgba(17, 20, 24, 0.85); border-radius: 8px; padding: 2px 8px; }
+#limit-note:empty { display: none; }
+#limit.wet #limit-sign { outline: 4px solid var(--accent); outline-offset: 2px; }
+
+/* Voies (flèches) */
+#lanes { display: flex; gap: 6px; margin-top: 12px; }
+#lanes:empty { display: none; }
+.lane { flex: 1; max-width: 64px; height: 52px; border-radius: 10px; background: #2a313b; color: #6b7685;
+  display: grid; place-items: center; font-size: 30px; font-weight: 700; letter-spacing: -6px; }
+.lane.ok { background: #fff; color: #0b3d91; }
+#guidance.compact #lanes { margin-top: 10px; }
+
+/* Vue « sortie » : panneau de direction façon autoroute */
+#junction { background: var(--panel); border-radius: var(--radius); padding: 14px; }
+#j-sign { background: #1f7a3f; border: 3px solid #fff; border-radius: 10px; padding: 12px 16px; color: #fff; }
+#junction.motorway #j-sign { background: #1d4fa3; }
+#j-num { display: inline-block; background: #fff; color: #1d4fa3; font-weight: 800; font-size: 18px; border-radius: 6px; padding: 2px 10px; }
+#junction:not(.motorway) #j-num { color: #1f7a3f; }
+#j-towards { font-size: 26px; font-weight: 700; margin-top: 8px; line-height: 1.15; }
+#j-roads { font-size: 16px; opacity: 0.9; margin-top: 4px; }
+#j-roads:empty { display: none; }
+#j-track { height: 8px; border-radius: 4px; background: #2a313b; margin-top: 12px; overflow: hidden; }
+#j-bar { height: 100%; width: 0; background: #7fd3ff; transition: width 0.8s linear; }
+#j-dist { font-size: 18px; color: var(--muted); margin-top: 6px; }
 
 /* Boutons droite */
 #controls { position: absolute; right: 16px; bottom: 56px; display: flex; flex-direction: column; gap: 12px; z-index: 2; }
@@ -114,4 +161,9 @@ body.navigating #panel { width: 400px; }
   #controls button { width: 56px; height: 56px; }
   #speed { width: 72px; height: 72px; }
   #speed-val { font-size: 24px; }
+  #limit { left: 92px; }
+  #limit-sign { width: 72px; height: 72px; border-width: 8px; }
+  #limit-val { font-size: 26px; }
+  #j-towards { font-size: 20px; }
+  .lane { height: 40px; font-size: 22px; }
 }
